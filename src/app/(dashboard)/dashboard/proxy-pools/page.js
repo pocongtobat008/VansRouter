@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
+import { countBatchResults, dedupeProxyEntries, runProxyPoolBatch } from "./batchOperations.js";
 
 function parseProxyLine(line) {
   const trimmed = line.trim();
@@ -152,6 +153,7 @@ export default function ProxyPoolsPage() {
   const [healthChecking, setHealthChecking] = useState(false);
   const [healthProgress, setHealthProgress] = useState({ current: 0, total: 0 });
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ label: "", current: 0, total: 0 });
   const [confirmState, setConfirmState] = useState(null);
   const relayMenuRef = useRef(null);
   const notify = useNotificationStore();
@@ -321,22 +323,22 @@ export default function ProxyPoolsPage() {
     const targets = selectedIds.length > 0 ? selectedIds : proxyPools.map((p) => p.id);
     if (targets.length === 0) return;
     setBulkBusy(true);
+    setBatchProgress({ label: isActive ? "Activating" : "Deactivating", current: 0, total: targets.length });
     try {
-      const results = await Promise.all(targets.map(async (id) => {
-        try {
-          const res = await fetch(`/api/proxy-pools/${id}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ isActive }),
-          });
-          return res.ok ? "ok" : "fail";
-        } catch { return "fail"; }
-      }));
-      const ok = results.filter(r => r === "ok").length;
-      const failed = results.filter(r => r === "fail").length;
+      const results = await runProxyPoolBatch(targets, async (id) => {
+        const res = await fetch(`/api/proxy-pools/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive }),
+        });
+        return res.ok ? "ok" : "fail";
+      }, (current) => setBatchProgress((prev) => ({ ...prev, current })));
+      const { ok = 0, fail = 0 } = countBatchResults(results);
+      const failed = fail;
       await fetchProxyPools();
       notify.success(`${isActive ? "Activated" : "Deactivated"} ${ok}${failed ? `, failed ${failed}` : ""}`);
     } finally {
+      setBatchProgress({ label: "", current: 0, total: 0 });
       setBulkBusy(false);
     }
   };
@@ -349,22 +351,21 @@ export default function ProxyPoolsPage() {
       onConfirm: async () => {
         setConfirmState(null);
         setBulkBusy(true);
+        const targets = [...selectedIds];
+        setBatchProgress({ label: "Deleting", current: 0, total: targets.length });
         try {
-          const results = await Promise.all(selectedIds.map(async (id) => {
-            try {
-              const res = await fetch(`/api/proxy-pools/${id}`, { method: "DELETE" });
-              if (res.ok) return "ok";
-              if (res.status === 409) return "blocked";
-              return "fail";
-            } catch { return "fail"; }
-          }));
-          const ok = results.filter(r => r === "ok").length;
-          const blocked = results.filter(r => r === "blocked").length;
-          const failed = results.filter(r => r === "fail").length;
+          const results = await runProxyPoolBatch(targets, async (id) => {
+            const res = await fetch(`/api/proxy-pools/${id}`, { method: "DELETE" });
+            if (res.ok) return "ok";
+            if (res.status === 409) return "blocked";
+            return "fail";
+          }, (current) => setBatchProgress((prev) => ({ ...prev, current })));
+          const { ok = 0, blocked = 0, fail: failed = 0 } = countBatchResults(results);
           await fetchProxyPools();
           clearSelection();
           notify.success(`Deleted ${ok}${blocked ? `, ${blocked} bound` : ""}${failed ? `, ${failed} failed` : ""}`);
         } finally {
+          setBatchProgress({ label: "", current: 0, total: 0 });
           setBulkBusy(false);
         }
       }
@@ -589,13 +590,11 @@ export default function ProxyPoolsPage() {
       let skipped = 0;
       let failed = 0;
 
-      const toCreate = parsedEntries.filter(entry => {
-        const dedupeKey = `${entry.proxyUrl}|||`;
-        if (existingKeys.has(dedupeKey)) { skipped += 1; return false; }
-        return true;
-      });
+      const { accepted: toCreate, skipped: duplicateCount } = dedupeProxyEntries(parsedEntries, existingKeys);
+      skipped += duplicateCount;
 
-      const results = await Promise.all(toCreate.map(async (entry) => {
+      setBatchProgress({ label: "Importing", current: 0, total: toCreate.length });
+      const results = await runProxyPoolBatch(toCreate, async (entry) => {
         const res = await fetch("/api/proxy-pools", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -606,12 +605,11 @@ export default function ProxyPoolsPage() {
             isActive: true,
           }),
         });
-        return res.ok;
-      }));
-
-      for (const ok of results) {
-        if (ok) created += 1; else failed += 1;
-      }
+        return res.ok ? "ok" : "fail";
+      }, (current) => setBatchProgress((prev) => ({ ...prev, current })));
+      const counts = countBatchResults(results);
+      created = counts.ok || 0;
+      failed = counts.fail || 0;
 
       await fetchProxyPools();
       setShowBatchImportModal(false);
@@ -620,6 +618,7 @@ export default function ProxyPoolsPage() {
       console.log("Error batch importing proxies:", error);
       notify.error("Batch import failed");
     } finally {
+      setBatchProgress({ label: "", current: 0, total: 0 });
       setImporting(false);
     }
   };
@@ -719,12 +718,21 @@ export default function ProxyPoolsPage() {
           <Badge variant="success">Active: {activeCount}</Badge>
         </div>
 
-        {(selectedIds.length > 0 || healthChecking) && (
+        {(selectedIds.length > 0 || healthChecking || batchProgress.total > 0) && (
           <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
             <span className="material-symbols-outlined text-[18px] text-primary">checklist</span>
             <span className="text-xs font-medium text-primary">
-              {selectedIds.length > 0 ? `${selectedIds.length} selected` : "All pools"}
+              {batchProgress.total > 0
+                ? `${batchProgress.label} ${batchProgress.current}/${batchProgress.total}`
+                : selectedIds.length > 0 ? `${selectedIds.length} selected` : "All pools"}
             </span>
+            {batchProgress.total > 0 && (
+              <div className="w-full basis-full" role="progressbar" aria-valuemin="0" aria-valuemax={batchProgress.total} aria-valuenow={batchProgress.current} aria-label={`${batchProgress.label} progress`}>
+                <div className="h-1.5 overflow-hidden rounded-full bg-primary/15">
+                  <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }} />
+                </div>
+              </div>
+            )}
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <Button
                 size="sm"

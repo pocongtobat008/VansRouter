@@ -1,6 +1,6 @@
 {
   "name": "vansrouter-app",
-  "version": "0.9.97",
+  "version": "0.9.99",
   "description": "9Router web dashboard",
   "private": true,
   "engines": {

@@ -5,6 +5,7 @@ import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS, PROVIDER_OAUTH } from "open-sse/config/providers.js";
 import { getKimchiUserAgent } from "open-sse/utils/kimchiUserAgent.js";
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
+import { resolveQoderCredentials, resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
 import { cleanCookie } from "open-sse/utils/cookie.js";
 import { validateMuseSparkConnection } from "open-sse/executors/muse-spark-web.js";
@@ -256,6 +257,22 @@ export async function POST(request) {
       }
 
       switch (provider) {
+        case "qoder": {
+          try {
+            const credentials = await resolveQoderCredentials(
+              { apiKey, providerSpecificData },
+              null,
+              AbortSignal.timeout(8000),
+            );
+            const result = await resolveQoderModels(credentials, { forceRefresh: true });
+            isValid = !!result?.models?.length;
+          } catch (err) {
+            error = err.message;
+            isValid = false;
+          }
+          break;
+        }
+
         case "openai":
           const openaiRes = await fetch("https://api.openai.com/v1/models", {
             headers: { "Authorization": `Bearer ${apiKey}` },

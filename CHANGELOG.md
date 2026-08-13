@@ -1,3 +1,24 @@
+# v0.9.99 (2026-08-09)
+
+VansRouter 0.9.99 hardens Qoder authentication, proxy-pool batch operations, OAuth callback handling, and SQLite fallback compatibility.
+
+## Provider and runtime fixes
+
+- **Qoder PAT authentication** — Centralized Personal Access Token exchange, short-lived job-token caching, concurrent request deduplication, user resolution, model validation, and upstream stream cancellation coverage.
+- **OAuth lifecycle** — Hardened callback state matching, duplicate callback protection, stale-response rejection, and retry behavior across provider auth modals.
+- **SQLite fallback** — Restored the legacy `better-sqlite3`/`node:sqlite` → `sql.js` fallback path for compatibility with older runtime behavior.
+
+## Dashboard and maintenance
+
+- **Proxy-pool batches** — Added sequential batch progress reporting, duplicate-input filtering, partial-failure accounting, and extracted batch orchestration helpers.
+- **Cleanup** — Removed disabled `got-scraping` code and replaced the client-side UUID helper with the native Web Crypto API.
+
+## Verification
+
+- Full Vitest suite: **232 test files passed; 2,787 tests passed; 13 skipped; 19 expected failures**.
+- OpenCode golden header suite: **176 tests passed**.
+- `lint:undef`, `lint:reacthooks`, and production build passed.
+
 # v0.9.97 (2026-08-08)
 
 VansRouter 0.9.97 hardens production SQLite packaging and provider display resolution.

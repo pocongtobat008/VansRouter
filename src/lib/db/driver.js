@@ -62,14 +62,7 @@ async function initAdapter() {
   let adapter = await tryBunSqlite();
   if (!adapter) adapter = await tryBetterSqlite();
   if (!adapter) adapter = await tryNodeSqlite();
-  if (!adapter) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error(
-        "[DB] Native SQLite driver unavailable. Run `npm install --include=optional` with Node >=22.5.0, then restart 9router. Existing database was not modified.",
-      );
-    }
-    adapter = await trySqlJs();
-  }
+  if (!adapter) adapter = await trySqlJs();
   if (!adapter) throw new Error("[DB] No SQLite driver available (bun/better/node/sql.js all failed)");
 
   if (!state.logged) {

@@ -1131,7 +1131,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > kimi → headers (ap
     "X-Msh-Device-Model": "Linux x64",
     "X-Msh-Device-Name": "VM-6-151-ubuntu",
     "X-Msh-Platform": "9router",
-    "X-Msh-Version": "0.9.97",
+    "X-Msh-Version": "0.9.99",
     "x-api-key": "<CRED>",
   },
   "nonStream": {
@@ -1142,7 +1142,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > kimi → headers (ap
     "X-Msh-Device-Model": "Linux x64",
     "X-Msh-Device-Name": "VM-6-151-ubuntu",
     "X-Msh-Platform": "9router",
-    "X-Msh-Version": "0.9.97",
+    "X-Msh-Version": "0.9.99",
     "x-api-key": "<CRED>",
   },
   "oauth": {
@@ -1154,7 +1154,7 @@ exports[`GOLDEN buildHeaders (default executor providers) > kimi → headers (ap
     "X-Msh-Device-Model": "Linux x64",
     "X-Msh-Device-Name": "VM-6-151-ubuntu",
     "X-Msh-Platform": "9router",
-    "X-Msh-Version": "0.9.97",
+    "X-Msh-Version": "0.9.99",
     "x-api-key": "<CRED>",
   },
 }
