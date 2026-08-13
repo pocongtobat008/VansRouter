@@ -5,6 +5,10 @@ import { OAUTH_ENDPOINTS, GEMINI_CLI_API_CLIENT, geminiCLIUserAgent } from "../c
 export class GeminiCLIExecutor extends BaseExecutor {
   constructor() {
     super("gemini-cli", PROVIDERS["gemini-cli"]);
+    // Google v1internal generateContent rejects an unknown top-level "stream" field
+    // (400 "Unknown name stream: Cannot find field"). Streaming is chosen via the URL
+    // (?alt=sse), so never mirror body.stream into the upstream payload.
+    this.mirrorStreamToBody = false;
   }
 
   buildUrl(model, stream, urlIndex = 0) {

@@ -123,13 +123,18 @@ export function createErrorResult(statusCode, message, resetsAtMs, policyError =
  * @param {string} message - Error message (without retry info)
  * @param {string} retryAfter - ISO timestamp when earliest account becomes available
  * @param {string} retryAfterHuman - Human-readable retry info e.g. "reset after 30s"
+ * @param {boolean} [allRateLimited=false] - True when EVERY account of the provider is
+ *   currently rate-limited. Lets combo/fallback loops skip the rest of that provider
+ *   instead of trying each model one-by-one.
  * @returns {Response}
  */
-export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
+export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman, allRateLimited = false) {
   const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
   const msg = `${message} (${retryAfterHuman})`;
+  const body = { error: { message: msg } };
+  if (allRateLimited) body.allRateLimited = true;
   return new Response(
-    JSON.stringify({ error: { message: msg } }),
+    JSON.stringify(body),
     {
       status: statusCode,
       headers: {

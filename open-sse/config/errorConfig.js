@@ -68,6 +68,16 @@ export const ERROR_RULES = [
   { text: "quota exceeded",           backoff: true },
   { text: "capacity",                 backoff: true },
   { text: "overloaded",               backoff: true },
+  // Google-specific quota exhaustion patterns (Antigravity/Gemini)
+  // Fix for: https://github.com/decolua/9router/issues/2964
+  // Matches: "Resource has been exhausted (e.g. check quota)"
+  { text: "resource has been exhausted", backoff: true },
+  // Matches: "tokens per minute" / TPM limit errors
+  { text: "tokens per minute",       backoff: true },
+  // Matches: "requests per minute" / RPM limit errors
+  { text: "requests per minute",     backoff: true },
+  // Matches: "check quota" (Google-style quota messages)
+  { text: "check quota",             backoff: true },
 
   // --- Status-based rules (fallback when text doesn't match) ---
   { status: 401, cooldownMs: COOLDOWN.long },

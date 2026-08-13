@@ -3,6 +3,7 @@
  */
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { recordSuccess, recordFailure, isAvailable, sortByHealth } from "./healthTracker.js";
 import { unavailableResponse } from "../utils/error.js";
 import { DEFAULT_COMBO_TARGET_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
@@ -95,6 +96,15 @@ export function reorderByCapabilities(models, required) {
  * @type {Map<string, { index: number, consecutiveUseCount: number }>}
  */
 const comboRotationState = new Map();
+
+/**
+ * Smart ordering: sort models by health status and latency
+ * Uses Health Tracker to determine which models are healthy and fast
+ */
+export function orderByHealth(models) {
+  if (!Array.isArray(models) || models.length <= 1) return models;
+  return sortByHealth(models);
+}
 
 // Trailing run of items after the last assistant/model turn = the current user
 // turn. It may span several messages (e.g. text + image split across blocks),
@@ -275,6 +285,12 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
+  // Smart strategy: order by health status and latency
+  if (comboStrategy === "smart") {
+    rotatedModels = orderByHealth(rotatedModels);
+    log.info("COMBO", `Smart ordering applied: ${rotatedModels[0]} (best health)`);
+  }
+
   // Auto-switch: float models that satisfy the request's required capabilities to the front.
   if (autoSwitch) {
     const required = detectRequiredCapabilities(body);
@@ -290,6 +306,10 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   let lastError = null;
   let earliestRetryAfter = null;
   let lastStatus = null;
+  // Providers whose EVERY account is currently rate-limited. Once one model of a
+  // provider reports allRateLimited, skip the remaining models of that provider
+  // in this run instead of trying each one-by-one (they'd all fail the same way).
+  const exhaustedProviders = new Set();
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
@@ -303,7 +323,24 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       );
     }
 
+    // Skip other models from a provider whose accounts are all rate-limited
+    // (they would fail identically — save the upstream calls + latency).
+    const modelProvider = modelStr.includes("/") ? modelStr.split("/")[0] : "";
+    if (modelProvider && exhaustedProviders.has(modelProvider)) {
+      log.info("COMBO", `Skipping ${modelStr} — provider ${modelProvider} all accounts rate-limited`);
+      if (!lastError) lastError = "Provider all accounts rate-limited";
+      continue;
+    }
+
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
+    
+    // Smart strategy: skip models that are currently unavailable (circuit OPEN / rate-limited)
+    if (comboStrategy === "smart" && !isAvailable(modelStr)) {
+      log.info("COMBO", `Skipping ${modelStr} — circuit OPEN or rate-limited`);
+      lastError = "Model unavailable (circuit breaker open)";
+      continue;
+    }
+    const attemptStart = Date.now();
 
     try {
       let result;
@@ -353,6 +390,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
       // Success (2xx) - return response
       if (result.ok) {
+        recordSuccess(modelStr, Date.now() - attemptStart);
         log.info("COMBO", `Model ${modelStr} succeeded`);
         return result;
       }
@@ -360,12 +398,22 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Extract error info from response
       let errorText = result.statusText || "";
       let retryAfter = null;
+      let allRateLimited = false;
       try {
         const errorBody = await result.clone().json();
         errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
         retryAfter = errorBody?.retryAfter || null;
+        // True when EVERY account of this provider is locked/rate-limited.
+        allRateLimited = errorBody?.allRateLimited === true;
       } catch {
         // Ignore JSON parse errors
+      }
+
+      // All accounts of this provider are locked — remember it so the rest of
+      // that provider's models in this combo are skipped immediately.
+      if (allRateLimited && modelProvider) {
+        exhaustedProviders.add(modelProvider);
+        log.info("COMBO", `Provider ${modelProvider} all accounts rate-limited — skipping its remaining models`);
       }
 
       // Track earliest retryAfter across all combo models
@@ -395,6 +443,10 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         await new Promise(r => setTimeout(r, cooldownMs));
       }
 
+      // Record failure for health tracking
+      const isRateLimit = result.status === 429;
+      recordFailure(modelStr, errorText, isRateLimit);
+      
       // Fallback to next model
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;

@@ -238,7 +238,30 @@ async function onboardUser(accessToken, tierID, externalSignal, endpoints, provi
                     console.log(`[ProjectId] Successfully onboarded, project ID: ${projectId}`);
                     return projectId;
                 }
-                throw new Error("onboardUser done but no project_id in response");
+                // onboardUser succeeded but no project_id in response.
+                // Try loadCodeAssist again — the project may now be assigned.
+                console.log(`[ProjectId] onboardUser done but no project_id — retrying loadCodeAssist`);
+                try {
+                    const retryRes = await fetch(endpoints.loadCodeAssist, {
+                        method: "POST",
+                        headers: { ...headers, "Authorization": `Bearer ${accessToken}` },
+                        body: JSON.stringify({ metadata: LOAD_CODE_ASSIST_METADATA }),
+                        signal: localCtrl.signal
+                    });
+                    if (retryRes.ok) {
+                        const retryData = await retryRes.json();
+                        const retryProjectId = extractProjectId(retryData);
+                        if (retryProjectId) {
+                            console.log(`[ProjectId] loadCodeAssist retry succeeded, project ID: ${retryProjectId}`);
+                            return retryProjectId;
+                        }
+                    }
+                } catch (retryErr) {
+                    console.warn(`[ProjectId] loadCodeAssist retry failed: ${retryErr.message}`);
+                }
+                // Still no project — return null to avoid infinite retries
+                console.warn(`[ProjectId] no project_id available after onboarding — returning null`);
+                return null;
             }
 
             // Server not done yet – wait and retry

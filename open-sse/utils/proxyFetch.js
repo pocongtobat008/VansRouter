@@ -1,4 +1,5 @@
 import { Readable } from "stream";
+import { createGunzip } from "zlib";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 
@@ -263,15 +264,20 @@ async function createBypassRequest(parsedUrl, realIP, options) {
       };
 
       const req = https.request(reqOptions, (res) => {
+        // Raw https.request does not auto-decompress. Google's cloudcode endpoints
+        // gzip their bodies unconditionally, so decompress based on content-encoding
+        // (otherwise SSE/JSON parsing sees the raw gzip bytes).
+        const encoding = String(res.headers["content-encoding"] || "").toLowerCase();
+        const bodyStream = encoding.includes("gzip") ? res.pipe(createGunzip()) : res;
         const response = {
           ok: res.statusCode >= HTTP_SUCCESS_MIN && res.statusCode < HTTP_SUCCESS_MAX,
           status: res.statusCode,
           statusText: res.statusMessage,
           headers: new Map(Object.entries(res.headers)),
-          body: Readable.toWeb(res),
+          body: Readable.toWeb(bodyStream),
           text: async () => {
             const chunks = [];
-            for await (const chunk of res) chunks.push(chunk);
+            for await (const chunk of bodyStream) chunks.push(chunk);
             return Buffer.concat(chunks).toString();
           },
           json: async () => JSON.parse(await response.text()),

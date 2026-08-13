@@ -5,7 +5,7 @@
  * Most LLM providers return HTTP 429 for three semantically different reasons:
  *
  * 1. **rate_limit**: short transient back-off ("too many requests in the
- *    last minute"). Fix: wait ~60s and retry.
+ *    last minute"). Fix: wait ~5 minutes and retry.
  * 2. **quota_exhausted**: long-period cap hit ("monthly limit reached",
  *    "insufficient quota", "out of credits"). Fix: wait ~1h before retrying.
  * 3. **daily_quota**: daily cap hit ("today's quota exhausted", "daily
@@ -20,8 +20,12 @@
  * @module open-sse/utils/classify429
  */
 
-/** Cooldown (ms) applied when a 429 is classified as a short rate-limit. */
-export const RATE_LIMIT_COOLDOWN_MS = 60_000;
+/**
+ * Cooldown (ms) applied when a 429 is classified as a short rate-limit.
+ * ~5 minutes: gives the account a rest before it can be tried again,
+ * preventing hot-looping against the provider's per-minute quota.
+ */
+export const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 /** Cooldown (ms) applied when a 429 is classified as quota exhaustion (~1h). */
 export const QUOTA_EXHAUSTED_COOLDOWN_MS = 3_600_000;
 

@@ -138,10 +138,18 @@ async function buildQoderRequestBody({ model, body, credentials, log, proxyOptio
     // Try a forced refresh once before giving up — the cache may simply
     // not be populated yet on first ever call for this credential.
     const refreshed = await resolveQoderModels(credentials, { forceRefresh: true, log, proxyOptions, signal });
-    const retried = refreshed?.rawConfigs.get(qoderKey);
-    if (!retried) {
+    if (!refreshed) {
+      // The live model-list fetch itself failed (network / auth / upstream
+      // 403). Surface that clearly instead of blaming the model key.
       throw new Error(
-        `qoder: model_config for "${qoderKey}" not yet known (run a model list fetch or check upstream connectivity)`,
+        `qoder: model list fetch failed for "${qoderKey}" (check account login/token, then retry)`,
+      );
+    }
+    const retried = refreshed.rawConfigs.get(qoderKey);
+    if (!retried) {
+      const known = Array.from(refreshed.rawConfigs.keys()).slice(0, 20).join(", ");
+      throw new Error(
+        `qoder: model "${qoderKey}" is not available on this account (known: ${known})`,
       );
     }
     modelConfig = { ...retried, key: qoderKey };

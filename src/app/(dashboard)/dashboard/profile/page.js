@@ -968,18 +968,36 @@ export default function ProfilePage() {
             <h3 className="text-base sm:text-lg font-semibold">Routing Strategy</h3>
           </div>
           <div className="flex flex-col gap-4">
-            <div className="flex items-start sm:items-center justify-between gap-4">
+            <div className="flex flex-col gap-2">
               <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm sm:text-base">Round Robin</p>
+                <p className="font-medium text-sm sm:text-base">Account Rotation</p>
                 <p className="text-xs sm:text-sm text-text-muted">
-                  Cycle through accounts to distribute load
+                  How accounts are selected when a provider has multiple connections
                 </p>
               </div>
-              <Toggle
-                checked={settings.fallbackStrategy === "round-robin"}
-                onChange={() => updateFallbackStrategy(settings.fallbackStrategy === "round-robin" ? "fill-first" : "round-robin")}
-                disabled={loading}
-              />
+              <div className="inline-flex p-1 rounded-lg bg-black/5 dark:bg-white/5 w-full sm:w-auto">
+                {[
+                  { value: "fill-first", label: "Fill First", desc: "Use accounts in priority order" },
+                  { value: "round-robin", label: "Round Robin", desc: "Rotate accounts across requests" },
+                  { value: "smart", label: "Smart", desc: "Auto-skip rate-limited accounts, use fastest healthy" },
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => updateFallbackStrategy(option.value)}
+                    disabled={loading}
+                    title={option.desc}
+                    className={cn(
+                      "flex items-center justify-center px-2 sm:px-3 py-1.5 rounded-md font-medium transition-all flex-1 sm:flex-initial",
+                      settings.fallbackStrategy === option.value
+                        ? "bg-white dark:bg-white/10 text-text-main shadow-sm"
+                        : "text-text-muted hover:text-text-main"
+                    )}
+                  >
+                    <span className="text-xs sm:text-sm">{option.label}</span>
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Sticky Round Robin Limit */}
@@ -1003,19 +1021,39 @@ export default function ProfilePage() {
               </div>
             )}
 
-            {/* Combo Round Robin */}
-            <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-border/50">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm sm:text-base">Combo Round Robin</p>
-                <p className="text-xs sm:text-sm text-text-muted">
-                  Cycle through providers in combos instead of always starting with first
-                </p>
+            {/* Combo Strategy */}
+            <div className="flex flex-col gap-2 pt-4 border-t border-border/50">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">Combo Strategy</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    How combos pick which provider to try first
+                  </p>
+                </div>
               </div>
-              <Toggle
-                checked={settings.comboStrategy === "round-robin"}
-                onChange={() => updateComboStrategy(settings.comboStrategy === "round-robin" ? "fallback" : "round-robin")}
-                disabled={loading}
-              />
+              <div className="inline-flex p-1 rounded-lg bg-black/5 dark:bg-white/5 w-full sm:w-auto">
+                {[
+                  { value: "fallback", label: "Fallback", desc: "Try models in order" },
+                  { value: "round-robin", label: "Round Robin", desc: "Rotate models across requests" },
+                  { value: "smart", label: "Smart", desc: "Auto-pick the fastest healthy provider" },
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => updateComboStrategy(option.value)}
+                    disabled={loading}
+                    title={option.desc}
+                    className={cn(
+                      "flex items-center justify-center px-2 sm:px-3 py-1.5 rounded-md font-medium transition-all flex-1 sm:flex-initial",
+                      settings.comboStrategy === option.value
+                        ? "bg-white dark:bg-white/10 text-text-main shadow-sm"
+                        : "text-text-muted hover:text-text-main"
+                    )}
+                  >
+                    <span className="text-xs sm:text-sm">{option.label}</span>
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Combo Sticky Round Robin Limit */}
@@ -1042,10 +1080,14 @@ export default function ProfilePage() {
             <p className="text-xs text-text-muted italic pt-2 border-t border-border/50">
               {settings.fallbackStrategy === "round-robin"
                 ? `Currently distributing requests across all available accounts with ${settings.stickyRoundRobinLimit || 3} calls per account.`
-                : "Currently using accounts in priority order (Fill First)."}
+                : settings.fallbackStrategy === "smart"
+                  ? "Auto-skip rate-limited accounts and use the fastest healthy one."
+                  : "Currently using accounts in priority order (Fill First)."}
               {settings.comboStrategy === "round-robin"
                 ? ` Combos rotate after ${settings.comboStickyRoundRobinLimit || 1} call${(settings.comboStickyRoundRobinLimit || 1) === 1 ? "" : "s"} per model.`
-                : " Combos always start with their first model."}
+                : settings.comboStrategy === "smart"
+                  ? " Combos auto-pick the fastest healthy provider and skip rate-limited ones."
+                  : " Combos always start with their first model."}
             </p>
           </div>
         </Card>

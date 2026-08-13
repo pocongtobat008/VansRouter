@@ -87,6 +87,37 @@ export function getProviderResilienceProfile(provider) {
 }
 
 /**
+ * Default cooldown for a rate-limited (429) account before it can be tried
+ * again. ~5 minutes gives the account a rest so its per-minute quota refills
+ * without hot-looping the provider.
+ */
+const DEFAULT_RATE_LIMIT_COOLDOWN_MS = envInt("VANSROUTER_RATE_LIMIT_COOLDOWN_MS", 5 * 60 * 1000);
+
+/**
+ * Normalize a provider id into an env-var-safe suffix (uppercase, non-alnum → `_`).
+ */
+function providerEnvSuffix(provider) {
+  return String(provider || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "_");
+}
+
+/**
+ * Resolve the account rate-limit cooldown (ms) for a provider.
+ *
+ * Precedence:
+ *   1. Per-provider env override: `VANSROUTER_RATE_LIMIT_COOLDOWN_MS_<PROVIDER>`
+ *      (e.g. VANSROUTER_RATE_LIMIT_COOLDOWN_MS_ANTIGRAVITY=60000)
+ *   2. Global env override: `VANSROUTER_RATE_LIMIT_COOLDOWN_MS`
+ *   3. Default: 5 minutes
+ */
+export function getRateLimitCooldownMs(provider) {
+  const perProvider = envInt(`VANSROUTER_RATE_LIMIT_COOLDOWN_MS_${providerEnvSuffix(provider)}`, 0);
+  if (perProvider > 0) return perProvider;
+  return DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+}
+
+/**
  * Clear the provider-category cache. Useful in tests.
  */
 export function clearProviderResilienceCache() {

@@ -8,6 +8,7 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { scrubProxyAndFingerprintHeaders } from "../services/antigravityHeaderScrub.js";
 import { cleanJSONSchemaForAntigravity } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
+import { ANTIGRAVITY_BASE_URLS } from "../config/antigravityUpstream.js";
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
 function sanitizeFunctionName(name) {
@@ -118,6 +119,17 @@ function buildIdeRequestId({ body, request, credentials, model, requestType }) {
 export class AntigravityExecutor extends BaseExecutor {
   constructor() {
     super("antigravity", PROVIDERS.antigravity);
+    // Google v1internal generateContent rejects an unknown top-level "stream" field
+    // (400 "Unknown name stream: Cannot find field"). Streaming is chosen via the URL
+    // (?alt=sse), so never mirror body.stream into the upstream payload.
+    this.mirrorStreamToBody = false;
+  }
+
+  // Chat traffic must go to the daily (dev) endpoint first: the accounts' projects
+  // are provisioned there (production cloudcode-pa.googleapis.com returns 429
+  // "Resource has been exhausted" for them). Rotates on 429/404 via shouldRetry.
+  getBaseUrls() {
+    return ANTIGRAVITY_BASE_URLS;
   }
 
   buildUrl(model, stream, urlIndex = 0) {

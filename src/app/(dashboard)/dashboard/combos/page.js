@@ -320,6 +320,7 @@ export default function CombosPage() {
 const STRATEGY_OPTIONS = [
   { value: "fallback", label: "Fallback — try in order" },
   { value: "round-robin", label: "Round Robin — rotate" },
+  { value: "smart", label: "Smart — health-based ordering" },
   { value: "fusion", label: "Fusion — panel + judge" },
 ];
 

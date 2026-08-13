@@ -3,6 +3,7 @@ import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/con
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { classify429 } from "open-sse/utils/classify429.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { getRateLimitCooldownMs } from "open-sse/config/providerProfiles.js";
 import { resolveProviderId, FREE_PROVIDERS, AI_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
 
@@ -182,6 +183,45 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           consecutiveUseCount: 1
         });
       }
+    } else if (strategy === "smart") {
+      // Smart rotation: health-aware, least-recently-used with automatic
+      // skip of rate-limited accounts. Cycles through healthy accounts,
+      // deprioritizing those with recent failures.
+      const now = Date.now();
+      const scored = availableConnections.map(c => {
+        let score = 0;
+        // Penalize recently used accounts (prefer least-recently-used)
+        if (c.lastUsedAt) {
+          const sinceMs = now - new Date(c.lastUsedAt).getTime();
+          // More penalty for very recent use (< 10s), less for older
+          score -= Math.max(0, 30 - Math.floor(sinceMs / 1000));
+        } else {
+          score += 10; // Never used = bonus
+        }
+        // Penalize accounts with recent failures
+        if (c.lastError && c.lastErrorAt) {
+          const errorAge = now - new Date(c.lastErrorAt).getTime();
+          if (errorAge < 60000) score -= 20; // Failed in last minute
+          else if (errorAge < 300000) score -= 10; // Failed in last 5 min
+        }
+        // Penalize high backoff level
+        score -= (c.backoffLevel || 0) * 5;
+        // Bonus for higher priority (lower number = higher priority)
+        score += (10 - Math.min(c.priority || 0, 10));
+        return { connection: c, score };
+      });
+      
+      // Sort by score (highest first)
+      scored.sort((a, b) => b.score - a.score);
+      connection = scored[0].connection;
+      
+      // Update lastUsedAt
+      await updateProviderConnection(connection.id, {
+        lastUsedAt: new Date().toISOString(),
+        consecutiveUseCount: 1
+      });
+      
+      log.debug("AUTH", `${provider} | smart: picked ${connection.id?.slice(0, 8)} (score: ${scored[0].score})`);
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
       connection = availableConnections[0];
@@ -262,7 +302,12 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     // a shorter backoff cooldown.
     const classification = classify429({ status, body: errorText, provider });
     shouldFallback = true;
-    cooldownMs = classification.cooldownMs;
+    // Short rate-limits use the per-provider breaker cooldown (default ~5 min,
+    // overridable via VANSROUTER_RATE_LIMIT_COOLDOWN_MS[_<PROVIDER>]). Quota /
+    // daily-quota kinds keep their longer, semantically correct cooldowns.
+    cooldownMs = classification.kind === "rate_limit"
+      ? getRateLimitCooldownMs(provider)
+      : classification.cooldownMs;
     newBackoffLevel = backoffLevel;
   } else {
     ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
@@ -284,6 +329,22 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   const lockUpdate = buildModelLockUpdate(model, cooldownMs);
 
+  // For 429/quota/rate-limit errors, ALSO set modelLock___all (global lock)
+  // so this account is skipped for ALL models during cooldown, not just the
+  // one that failed. This prevents wasting requests on other models when the
+  // entire account is rate-limited.
+  const isGlobalLock = status === 429 || status === 402 || 
+    (errorText && (typeof errorText === 'string') && (
+      errorText.includes('quota') || errorText.includes('rate limit') || 
+      errorText.includes('exhausted') || errorText.includes('RESOURCE_EXHAUSTED') ||
+      errorText.includes('per minute') || errorText.includes('rpm') ||
+      errorText.includes('too many requests') || errorText.includes('TPM') ||
+      errorText.includes('daily limit') || errorText.includes('credits')
+    ));
+  if (isGlobalLock) {
+    lockUpdate['modelLock___all'] = new Date(Date.now() + cooldownMs).toISOString();
+  }
+
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
     testStatus: "unavailable",
@@ -293,7 +354,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     backoffLevel: newBackoffLevel ?? backoffLevel
   });
 
-  const lockKey = Object.keys(lockUpdate)[0];
+  const lockKey = isGlobalLock ? 'modelLock___all + ' + Object.keys(lockUpdate)[0] : Object.keys(lockUpdate)[0];
   const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
   log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
 

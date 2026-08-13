@@ -26,6 +26,7 @@ export default {
     },
   },
   models: [
+    { id: "qmodel_38max", name: "Qwen3.8-Max" },
     { id: "qmodel_latest", name: "Qoder Qwen 3.7 Max" },
     { id: "ultimate", name: "Ultimate" },
     { id: "auto", name: "Auto" },

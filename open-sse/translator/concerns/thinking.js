@@ -25,11 +25,17 @@ export function effortToBudget(effort) {
 
 // OpenAI reasoning_effort → Gemini thinkingLevel (gemini-3 enum: minimal|low|medium|high).
 // Gemini 3 cannot fully disable thinking; "none"/"off" map to "minimal".
+// Unknown/non-standard levels ("ultra", "xlow", etc.) fall back to "high" to avoid
+// Google API 400 INVALID_ARGUMENT on unsupported thinkingLevel values.
+// Fix for: https://github.com/decolua/9router/issues/2964
 export function effortToThinkingLevel(effort) {
   const e = String(effort).toLowerCase().trim();
   if (e === "none" || e === "off") return "minimal";
-  if (e === "xhigh" || e === "max") return "high";
-  return e;
+  if (e === "low") return "low";
+  if (e === "medium") return "medium";
+  if (e === "high" || e === "xhigh" || e === "max" || e === "ultra") return "high";
+  // Unknown level → default to high (safest valid value for Gemini)
+  return "high";
 }
 
 // Numeric budget → nearest discrete level (reverse map via thresholds).

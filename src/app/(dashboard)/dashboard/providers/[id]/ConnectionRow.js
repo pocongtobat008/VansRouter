@@ -187,6 +187,13 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     .filter(v => !!v)
     .sort()[0] || null;
 
+  // Detect lock type: global (modelLock___all) means account is locked for ALL models
+  const isGlobalLock = connection['modelLock___all'] && 
+    new Date(connection['modelLock___all']).getTime() > Date.now();
+  const activeModelLocks = Object.entries(connection)
+    .filter(([k]) => k.startsWith('modelLock_') && k !== 'modelLock___all')
+    .filter(([, v]) => v && new Date(v).getTime() > Date.now());
+
   useEffect(() => {
     const checkCooldown = () => {
       const until = Object.entries(connection)
@@ -269,6 +276,18 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               </Badge>
             )}
             {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
+            {isGlobalLock && connection.isActive !== false && (
+              <Badge variant="error" size="sm">
+                <span className="material-symbols-outlined text-[10px]">block</span>
+                Global Lock
+              </Badge>
+            )}
+            {!isGlobalLock && activeModelLocks.length > 0 && connection.isActive !== false && (
+              <Badge variant="warning" size="sm">
+                <span className="material-symbols-outlined text-[10px]">lock</span>
+                Model Lock ({activeModelLocks.length})
+              </Badge>
+            )}
             {connection.lastError && connection.isActive !== false && (
               <span className="max-w-full truncate text-xs text-red-500 sm:max-w-[300px]" title={connection.lastError}>
                 {connection.lastError}

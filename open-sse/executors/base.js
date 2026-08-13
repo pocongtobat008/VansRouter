@@ -135,7 +135,7 @@ export class BaseExecutor {
       // Always mirror the effective stream flag into the upstream body so providers
       // that key off body.stream (e.g. cline: stream:false → JSON envelope, stream:true → SSE)
       // return the transport shape the handler pipeline expects.
-      if (transformedBody && typeof transformedBody === "object" && !Array.isArray(transformedBody)) {
+      if (transformedBody && typeof transformedBody === "object" && !Array.isArray(transformedBody) && this.mirrorStreamToBody !== false) {
         transformedBody.stream = stream;
       }
       const headers = this.buildHeaders(credentials, stream);

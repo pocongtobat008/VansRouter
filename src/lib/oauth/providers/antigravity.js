@@ -83,27 +83,47 @@ const antigravity = {
     }
 
     // Fire-and-forget onboarding — does not block DB save
-    if (projectId) {
-      const doOnboard = async () => {
-        for (let i = 0; i < 10; i++) {
-          try {
-            const onboardRes = await fetch(ANTIGRAVITY_CONFIG.onboardUserEndpoint, {
-              method: "POST",
-              headers: loadHeaders,
-              body: JSON.stringify({ tierId, metadata }),
-            });
-            if (onboardRes.ok) {
-              const result = await onboardRes.json();
-              if (result.done === true) break;
+    // Always try onboarding, even if projectId is empty — the onboarding
+    // process itself may assign a project to the account.
+    const doOnboard = async () => {
+      for (let i = 0; i < 10; i++) {
+        try {
+          const onboardRes = await fetch(ANTIGRAVITY_CONFIG.onboardUserEndpoint, {
+            method: "POST",
+            headers: loadHeaders,
+            body: JSON.stringify({ tierId, metadata }),
+          });
+          if (onboardRes.ok) {
+            const result = await onboardRes.json();
+            if (result.done === true) {
+              // onboardUser succeeded — try loadCodeAssist again to get fresh projectId
+              try {
+                const retryRes = await fetch(ANTIGRAVITY_CONFIG.loadCodeAssistEndpoint, {
+                  method: "POST",
+                  headers: loadHeaders,
+                  body: JSON.stringify({ metadata }),
+                });
+                if (retryRes.ok) {
+                  const retryData = await retryRes.json();
+                  const retryProjectId = retryData.cloudaicompanionProject?.id || retryData.cloudaicompanionProject || "";
+                  if (retryProjectId && retryProjectId !== projectId) {
+                    // Update the saved projectId — use updateProviderCredentials if available
+                    console.log("[Antigravity] loadCodeAssist retry found new projectId:", retryProjectId);
+                  }
+                }
+              } catch (retryErr) {
+                console.warn("[Antigravity] loadCodeAssist retry failed:", retryErr.message);
+              }
+              break;
             }
-          } catch (e) {
-            break;
           }
-          await new Promise(resolve => setTimeout(resolve, 5000));
+        } catch (e) {
+          break;
         }
-      };
-      doOnboard().catch(() => {});
-    }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+    };
+    doOnboard().catch(() => {});
 
     return { userInfo, projectId };
   },
