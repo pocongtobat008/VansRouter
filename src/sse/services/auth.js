@@ -2,6 +2,7 @@ import { getProviderConnections, validateApiKey, updateProviderConnection, getSe
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, getModelLockKey, MODEL_LOCK_ALL } from "open-sse/services/accountFallback.js";
 import { classify429 } from "open-sse/utils/classify429.js";
+import { initAccountPool } from "open-sse/services/accountPoolManager.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { getRateLimitCooldownMs } from "open-sse/config/providerProfiles.js";
 import { resolveProviderId, FREE_PROVIDERS, AI_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers.js";
@@ -128,6 +129,16 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
     const connections = await getProviderConnections({ provider: providerId, isActive: true });
+
+    // Feed the account pool so the health dashboard can surface per-account
+    // stats (total/available/unavailable + health) per provider. Cheap and
+    // idempotent: existing accounts are kept, only missing ones are added.
+    try {
+      initAccountPool(providerId, connections);
+    } catch (e) {
+      log.debug("AUTH", `initAccountPool skipped for ${providerId}: ${e.message}`);
+    }
+
     log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
 
     if (connections.length === 0) {

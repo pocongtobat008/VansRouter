@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getPoolStats, getAvailableAccounts } from "open-sse/services/accountPoolManager.js";
+import { getPoolStats, getAvailableAccounts, initAccountPool } from "open-sse/services/accountPoolManager.js";
+import { getProviderConnections } from "@/lib/localDb";
 import { NextRequest } from "next/server";
 
 const CORS_HEADERS = {
@@ -28,6 +29,13 @@ export async function GET(request) {
       }, { status: 400, headers: CORS_HEADERS });
     }
     
+    // Populate the pool on demand so the dashboard shows stats even before
+    // the first request hits this provider (auth.js also feeds it per request).
+    try {
+      const conns = await getProviderConnections({ provider, isActive: true });
+      if (conns?.length) initAccountPool(provider, conns);
+    } catch {}
+
     const stats = getPoolStats(provider);
     const available = getAvailableAccounts(provider);
     
