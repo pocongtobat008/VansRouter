@@ -11,6 +11,12 @@
 // In-memory health state
 const healthState = new Map();
 
+// Time-to-first-token (TTFT) tracking. Kept separate from latencySamples so a
+// slow full-response (large output) never pollutes the first-token signal used
+// for routing. Keyed like healthState (model string / account health key).
+const ttftSamples = new Map();
+const MAX_TTFT_SAMPLES = 100;
+
 // Circuit breaker states
 const CIRCUIT_STATES = {
   CLOSED: 'closed',      // Normal operation
@@ -52,8 +58,11 @@ function getHealthState(key) {
 
 /**
  * Record a successful request
+ * @param {string} key - model/account key
+ * @param {number|null} latencyMs - total request latency
+ * @param {number|null} ttftMs - time-to-first-token, when known (streaming)
  */
-export function recordSuccess(key, latencyMs = null) {
+export function recordSuccess(key, latencyMs = null, ttftMs = null) {
   const state = getHealthState(key);
   
   state.consecutiveSuccesses++;
@@ -74,6 +83,11 @@ export function recordSuccess(key, latencyMs = null) {
       .slice(-DEFAULT_CONFIG.maxLatencySamples);
   }
   
+  // Track TTFT when the caller measured it (streaming first-token time)
+  if (ttftMs !== null && ttftMs !== undefined) {
+    recordTtft(key, ttftMs);
+  }
+  
   // Close circuit if we have enough successes
   if (state.circuitState === CIRCUIT_STATES.HALF_OPEN && 
       state.consecutiveSuccesses >= DEFAULT_CONFIG.successThreshold) {
@@ -82,6 +96,30 @@ export function recordSuccess(key, latencyMs = null) {
   }
   
   return state;
+}
+
+/**
+ * Record a time-to-first-token sample for a key without touching the success/
+ * failure counters (used by the streaming path where the request is still in
+ * flight but the first token has already arrived).
+ * @param {string} key - model/account key
+ * @param {number} ttftMs - ms from request start to first token
+ */
+export function recordTtft(key, ttftMs) {
+  if (ttftMs === null || ttftMs === undefined || !Number.isFinite(ttftMs) || ttftMs < 0) return;
+  const samples = ttftSamples.get(key) || [];
+  samples.push(ttftMs);
+  if (samples.length > MAX_TTFT_SAMPLES) samples.shift();
+  ttftSamples.set(key, samples);
+}
+
+/** Compute p50/p95 of a numeric array (empty → nulls). */
+function percentiles(values) {
+  if (!values || values.length === 0) return { p50: null, p95: null };
+  const sorted = [...values].sort((a, b) => a - b);
+  const p50 = sorted[Math.floor(sorted.length * 0.5)] ?? null;
+  const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? null;
+  return { p50, p95 };
 }
 
 /**
@@ -158,12 +196,17 @@ export function isAvailable(key) {
 export function getHealthStatus(key) {
   const state = healthState.get(key);
   if (!state) {
+    // TTFT may exist even before the first recordSuccess (streaming records it
+    // at first-token while the request is still in flight).
+    const { p50: ttftP50, p95: ttftP95 } = percentiles(ttftSamples.get(key));
     return {
       key,
       status: 'unknown',
       circuitState: CIRCUIT_STATES.CLOSED,
       latencyP50: null,
       latencyP95: null,
+      ttftP50,
+      ttftP95,
       failureRate: 0
     };
   }
@@ -175,6 +218,9 @@ export function getHealthStatus(key) {
   
   const p50 = sortedLatencies[Math.floor(sortedLatencies.length * 0.5)] || null;
   const p95 = sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] || null;
+
+  // TTFT percentiles (separate signal from total latency)
+  const { p50: ttftP50, p95: ttftP95 } = percentiles(ttftSamples.get(key));
   
   return {
     key,
@@ -188,6 +234,8 @@ export function getHealthStatus(key) {
     lastError: state.lastError,
     latencyP50: p50,
     latencyP95: p95,
+    ttftP50: ttftP50,
+    ttftP95: ttftP95,
     totalRequests: state.totalRequests,
     totalFailures: state.totalFailures,
     failureRate: state.totalRequests > 0 ? state.totalFailures / state.totalRequests : 0,
@@ -229,9 +277,11 @@ export function sortByHealth(keys) {
       const statusDiff = (statusOrder[a.health.status] || 2) - (statusOrder[b.health.status] || 2);
       if (statusDiff !== 0) return statusDiff;
       
-      // Then by latency (lower is better)
-      const latencyA = a.health.latencyP50 || Infinity;
-      const latencyB = b.health.latencyP50 || Infinity;
+      // Then by latency (lower is better). Prefer TTFT (first-token) — it's
+      // the perceived-speed signal — falling back to total latency when no
+      // TTFT samples exist yet.
+      const latencyA = a.health.ttftP50 || a.health.latencyP50 || Infinity;
+      const latencyB = b.health.ttftP50 || b.health.latencyP50 || Infinity;
       return latencyA - latencyB;
     })
     .map(item => item.key);
@@ -242,6 +292,7 @@ export function sortByHealth(keys) {
  */
 export function resetHealth(key) {
   healthState.delete(key);
+  ttftSamples.delete(key);
 }
 
 /**
@@ -249,6 +300,7 @@ export function resetHealth(key) {
  */
 export function clearAllHealth() {
   healthState.clear();
+  ttftSamples.clear();
 }
 
 /**
@@ -279,6 +331,7 @@ export function getHealthSummary() {
 
 export default {
   recordSuccess,
+  recordTtft,
   recordFailure,
   isAvailable,
   getHealthStatus,

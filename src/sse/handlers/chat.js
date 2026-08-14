@@ -165,6 +165,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
+    const comboRace = comboStrategies[modelStr]?.race === true || settings.comboRace === true;
     const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
     const adapterModels = getCapacityAdapterModels(settings);
@@ -206,6 +207,7 @@ export async function handleChat(request, clientRawRequest = null) {
       signal: request?.signal ?? null,
       timeoutMs: comboStrategies[modelStr]?.targetTimeoutMs ?? null,
       queueDepth: comboStrategies[modelStr]?.queueDepth ?? null,
+      race: comboRace,
     });
   }
 
@@ -232,6 +234,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboStrategies = chatSettings.comboStrategies || {};
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
+      const comboRace = comboStrategies[modelStr]?.race === true || chatSettings.comboRace === true;
       const requiredCapabilities = detectRequiredCapabilities(body);
       const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
@@ -273,6 +276,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         signal: request?.signal ?? null,
         timeoutMs: comboStrategies[modelStr]?.targetTimeoutMs ?? null,
         queueDepth: comboStrategies[modelStr]?.queueDepth ?? null,
+        race: comboRace,
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
@@ -426,6 +430,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     }
 
     // Log account selection
+    if (credentials._probe) {
+      log.warn("AUTH", `\x1b[33mPredictive probe: ${provider} account ${credentials.connectionName} (lock expires ${credentials._probeLockExpiresAt || "soon"}) — half-open test\x1b[0m`);
+    }
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
 
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);

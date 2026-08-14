@@ -1,6 +1,6 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProviderNodeById, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, getModelLockKey, MODEL_LOCK_ALL } from "open-sse/services/accountFallback.js";
 import { classify429 } from "open-sse/utils/classify429.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { getRateLimitCooldownMs } from "open-sse/config/providerProfiles.js";
@@ -11,6 +11,50 @@ import * as log from "../utils/logger.js";
 // other ACL helpers. Implementation lives in internalTrust.js (dependency-light
 // + independently unit-tested for exploit resistance).
 export { isTrustedInternalRequest } from "./internalTrust.js";
+
+// Predictive probe (half-open) tuning: when EVERY account of a provider is
+// locked, an account whose lock expires within PROBE_WINDOW_MS is allowed one
+// request through slightly before expiry instead of returning allRateLimited.
+// A success clears the lock early (clearAccountError); a failure just re-locks
+// with the normal cooldown. _lastProbeAt bounds probing per account so a
+// still-cooldowning account can't be hammered.
+const PROBE_WINDOW_MS = envMs("VANSROUTER_PREDICTIVE_PROBE_WINDOW_MS", 60 * 1000);
+const PROBE_INTERVAL_MS = envMs("VANSROUTER_PREDICTIVE_PROBE_INTERVAL_MS", 120 * 1000);
+const _lastProbeAt = new Map();
+
+function envMs(name, def) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : def;
+}
+
+/**
+ * Pick an account for a predictive (half-open) probe: the one whose model lock
+ * expires soonest, provided it is within PROBE_WINDOW_MS of expiring and has
+ * not been probed within PROBE_INTERVAL_MS. Returns { connection, lockExpiry }
+ * or null when nothing should be probed yet.
+ */
+function pickPredictiveProbe(connections, model, excludeSet) {
+  const now = Date.now();
+  let best = null;
+  for (const c of connections || []) {
+    if (excludeSet?.has(c.id)) continue; // already tried & failed this request
+    const expiryStr = c?.[getModelLockKey(model)] || c?.[MODEL_LOCK_ALL];
+    if (!expiryStr) continue;
+    const expiry = new Date(expiryStr).getTime();
+    if (!Number.isFinite(expiry) || expiry <= now) continue;
+    const remaining = expiry - now;
+    if (remaining > PROBE_WINDOW_MS) continue; // too early — keep resting
+    const probeKey = `${c.id}::${model || "*"}`;
+    if (now - (_lastProbeAt.get(probeKey) || 0) < PROBE_INTERVAL_MS) continue;
+    if (!best || remaining < best.remaining) {
+      best = { connection: c, remaining, lockExpiry: expiry };
+    }
+  }
+  if (best) {
+    _lastProbeAt.set(`${best.connection.id}::${model || "*"}`, now);
+  }
+  return best;
+}
 
 // Per-provider mutex — allows parallel credential selection across different providers
 // while preventing races within the same provider's account rotation.
@@ -109,6 +153,20 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
+      // Predictive probe: an account whose lock expires within PROBE_WINDOW_MS
+      // gets one request through slightly before expiry (half-open) instead of
+      // returning allRateLimited. A success clears the lock early; a failure
+      // re-locks with the normal cooldown. This shortens recovery from the
+      // full cooldown (e.g. 5 min) to a few seconds past the true reset.
+      const probe = pickPredictiveProbe(connections, model, excludeSet);
+      if (probe) {
+        log.info("AUTH", `${provider} | predictive probe: ${probe.connection.name || probe.connection.email || probe.connection.id?.slice(0, 8)} lock expires in ${Math.round(probe.remaining / 1000)}s — probing early`);
+        const creds = await buildConnectionCredentials(probe.connection, providerId, model);
+        creds._probe = true;
+        creds._probeLockExpiresAt = new Date(probe.lockExpiry).toISOString();
+        return creds;
+      }
+
       // Find earliest lock expiry across all connections for retry timing
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const expiries = lockedConns.flatMap(c => { const t = getEarliestModelLockUntil(c); return t ? [t] : []; });
@@ -227,44 +285,52 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections[0];
     }
 
-    // Scope the region-aware picker to this provider/model (e.g. freebuff::gpt-5.6-luna)
-    const psdForProxy = connection.providerSpecificData?.proxyPoolIds?.length
-      ? { ...connection.providerSpecificData, proxyPoolScope: `${providerId}::${model || ""}` }
-      : connection.providerSpecificData;
-    const resolvedProxy = await resolveConnectionProxyConfig(psdForProxy || {}, connection.id);
-
-    return {
-      authType: connection.authType,
-      apiKey: connection.apiKey,
-      accessToken: connection.accessToken,
-      refreshToken: connection.refreshToken,
-      idToken: connection.idToken,
-      expiresAt: connection.expiresAt,
-      expiresIn: connection.expiresIn,
-      lastRefreshAt: connection.lastRefreshAt,
-      projectId: connection.projectId,
-      connectionName: connection.displayName || connection.name || connection.email || connection.id,
-      copilotToken: connection.providerSpecificData?.copilotToken,
-      providerSpecificData: {
-        ...(connection.providerSpecificData || {}),
-        connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
-        connectionProxyUrl: resolvedProxy.connectionProxyUrl,
-        connectionNoProxy: resolvedProxy.connectionNoProxy,
-        connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
-        vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
-        proxyPoolId: resolvedProxy.proxyPoolId || null,
-        strictProxy: resolvedProxy.strictProxy === true,
-      },
-      connectionId: connection.id,
-      // Include current status for optimization check
-      testStatus: connection.testStatus,
-      lastError: connection.lastError,
-      // Pass full connection for clearAccountError to read modelLock_* keys
-      _connection: connection
-    };
+    return buildConnectionCredentials(connection, providerId, model);
   } finally {
     if (resolveMutex) resolveMutex();
   }
+}
+
+/**
+ * Build the full credentials object for a selected connection (shared by the
+ * normal selection path and the predictive-probe path).
+ */
+async function buildConnectionCredentials(connection, providerId, model) {
+  // Scope the region-aware picker to this provider/model (e.g. freebuff::gpt-5.6-luna)
+  const psdForProxy = connection.providerSpecificData?.proxyPoolIds?.length
+    ? { ...connection.providerSpecificData, proxyPoolScope: `${providerId}::${model || ""}` }
+    : connection.providerSpecificData;
+  const resolvedProxy = await resolveConnectionProxyConfig(psdForProxy || {}, connection.id);
+
+  return {
+    authType: connection.authType,
+    apiKey: connection.apiKey,
+    accessToken: connection.accessToken,
+    refreshToken: connection.refreshToken,
+    idToken: connection.idToken,
+    expiresAt: connection.expiresAt,
+    expiresIn: connection.expiresIn,
+    lastRefreshAt: connection.lastRefreshAt,
+    projectId: connection.projectId,
+    connectionName: connection.displayName || connection.name || connection.email || connection.id,
+    copilotToken: connection.providerSpecificData?.copilotToken,
+    providerSpecificData: {
+      ...(connection.providerSpecificData || {}),
+      connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
+      connectionProxyUrl: resolvedProxy.connectionProxyUrl,
+      connectionNoProxy: resolvedProxy.connectionNoProxy,
+      connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+      vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+      proxyPoolId: resolvedProxy.proxyPoolId || null,
+      strictProxy: resolvedProxy.strictProxy === true,
+    },
+    connectionId: connection.id,
+    // Include current status for optimization check
+    testStatus: connection.testStatus,
+    lastError: connection.lastError,
+    // Pass full connection for clearAccountError to read modelLock_* keys
+    _connection: connection
+  };
 }
 
 /**

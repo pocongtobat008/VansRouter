@@ -111,9 +111,12 @@ function calculateAccountScore(account, health) {
   else if (health.status === 'unknown') score += 30;
   else score += 0; // unhealthy
   
-  // Latency (lower is better, max 50 points)
-  if (health.latencyP50) {
-    score += Math.max(0, 50 - (health.latencyP50 / 100));
+  // Latency (lower is better, max 50 points). Prefer TTFT (first-token) — the
+  // perceived-speed signal — falling back to total latency when no TTFT
+  // samples exist yet.
+  const latencyMs = health.ttftP50 || health.latencyP50 || null;
+  if (latencyMs) {
+    score += Math.max(0, 50 - (latencyMs / 100));
   }
   
   // Success rate (0-50 points)
@@ -138,7 +141,7 @@ function calculateAccountScore(account, health) {
 /**
  * Record account success
  */
-export function recordAccountSuccess(providerId, accountId, latencyMs = null) {
+export function recordAccountSuccess(providerId, accountId, latencyMs = null, ttftMs = null) {
   const pool = accountPools.get(providerId);
   if (!pool) return;
   
@@ -150,7 +153,7 @@ export function recordAccountSuccess(providerId, accountId, latencyMs = null) {
   accountData.lastUsed = Date.now();
   
   // Record in health tracker
-  healthTracker.recordSuccess(accountData.healthKey, latencyMs);
+  healthTracker.recordSuccess(accountData.healthKey, latencyMs, ttftMs);
 }
 
 /**

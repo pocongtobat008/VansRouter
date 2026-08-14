@@ -267,6 +267,92 @@ function combineSignals(...signals) {
 }
 
 /**
+ * Fire two combo targets in parallel and keep the first that succeeds (HTTP ok).
+ * The loser is aborted via its own AbortController as soon as a winner exists,
+ * bounding the extra cost to one duplicate request while removing the
+ * wait-for-first-model penalty from the critical path.
+ *
+ * When both fail, resolves with { winner: null, errorText, status, ... } so the
+ * caller can fall back to the remaining (unraced) models.
+ */
+async function raceTwoTargets({ body, models, handleSingleModel, externalSignal, timeoutMs, queueDepth }) {
+  return new Promise((resolve) => {
+    const controllers = [new AbortController(), new AbortController()];
+    const signals = [
+      combineSignals(externalSignal, controllers[0].signal),
+      combineSignals(externalSignal, controllers[1].signal),
+    ];
+    let settled = 0;
+    let finished = false;
+    const failures = [null, null];
+
+    const finish = (payload) => {
+      if (finished) return;
+      finished = true;
+      resolve(payload);
+    };
+
+    const run = (i) => {
+      const targetOptions = {};
+      if (signals[i]) targetOptions.signal = signals[i];
+      if (queueDepth != null) targetOptions.maxQueueSize = queueDepth;
+
+      let timeoutId = null;
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timeoutId = setTimeout(() => controllers[i].abort(new Error("combo-race-timeout")), timeoutMs);
+      }
+
+      Promise.resolve(handleSingleModel(body, models[i], Object.keys(targetOptions).length > 0 ? targetOptions : undefined))
+        .then(async (res) => {
+          clearTimeout(timeoutId);
+          if (res && res.ok) {
+            controllers[1 - i].abort(new Error("combo-race-loser"));
+            finish({ winner: i, response: res });
+            return;
+          }
+          failures[i] = await extractRaceFailure(res);
+          settled++;
+          if (settled === 2) {
+            const first = failures[0] || failures[1];
+            finish({ winner: null, ...first });
+          }
+        })
+        .catch((err) => {
+          clearTimeout(timeoutId);
+          failures[i] = { errorText: err?.message || String(err), status: null, isRateLimit: false, allRateLimited: false };
+          settled++;
+          if (settled === 2) {
+            const first = failures[0] || failures[1];
+            finish({ winner: null, ...first });
+          }
+        });
+    };
+
+    run(0);
+    run(1);
+  });
+}
+
+/** Extract error summary from a non-ok combo response for fallback bookkeeping. */
+async function extractRaceFailure(res) {
+  let errorText = res?.statusText || "";
+  let allRateLimited = false;
+  try {
+    const errorBody = await res.clone().json();
+    errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
+    allRateLimited = errorBody?.allRateLimited === true;
+  } catch {
+    // Non-JSON error body — keep statusText.
+  }
+  return {
+    errorText: typeof errorText === "string" ? errorText : JSON.stringify(errorText),
+    status: res?.status || null,
+    isRateLimit: res?.status === 429,
+    allRateLimited,
+  };
+}
+
+/**
  * Handle combo chat with fallback
  * @param {Object} options
  * @param {Object} options.body - Request body
@@ -279,9 +365,10 @@ function combineSignals(...signals) {
  * @param {AbortSignal} [options.signal] - Optional external signal (e.g. client disconnect) that aborts every target
  * @param {number} [options.timeoutMs=DEFAULT_COMBO_TARGET_TIMEOUT_MS] - Max time to wait for a target to return response headers
  * @param {number} [options.queueDepth] - Optional per-combo account-semaphore queue depth (0 = fail immediately on saturation)
+ * @param {boolean} [options.race=false] - Fire the top 2 models in parallel and keep the first to succeed
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, signal = null, timeoutMs = DEFAULT_COMBO_TARGET_TIMEOUT_MS, queueDepth = null }) {
+export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, signal = null, timeoutMs = DEFAULT_COMBO_TARGET_TIMEOUT_MS, queueDepth = null, race = false }) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -311,7 +398,50 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   // in this run instead of trying each one-by-one (they'd all fail the same way).
   const exhaustedProviders = new Set();
 
-  for (let i = 0; i < rotatedModels.length; i++) {
+  // Race mode: fire the top 2 models in parallel, keep the first to succeed.
+  // The loser is aborted (bounded extra cost = one duplicate request) and the
+  // remaining models still run as an ordered fallback below. Both failures are
+  // recorded for health tracking; provider-exhaustion is honored so a
+  // fully-locked provider isn't retried.
+  let raceIndex = 0;
+  if (race && rotatedModels.length >= 2) {
+    const raceStart = Date.now();
+    const raceModels = rotatedModels.slice(0, 2);
+    log.info("COMBO", `Racing ${raceModels[0]} vs ${raceModels[1]} (first ok wins)`);
+    const raced = await raceTwoTargets({
+      body,
+      models: raceModels,
+      handleSingleModel,
+      externalSignal: signal,
+      timeoutMs,
+      queueDepth,
+    });
+
+    if (raced.winner != null) {
+      const winnerModel = raceModels[raced.winner];
+      const elapsedMs = Date.now() - raceStart;
+      recordSuccess(winnerModel, elapsedMs, elapsedMs);
+      log.info("COMBO", `Race winner: ${winnerModel} succeeded in ${elapsedMs}ms`);
+      return raced.response;
+    }
+
+    // Both raced models failed — record both for health tracking.
+    for (const modelStr of raceModels) {
+      recordFailure(modelStr, raced.errorText || "race failed", raced.isRateLimit === true);
+    }
+    lastError = raced.errorText || "All raced models failed";
+    if (raced.status) lastStatus = raced.status;
+    if (raced.allRateLimited) {
+      for (const modelStr of raceModels) {
+        const p = modelStr.includes("/") ? modelStr.split("/")[0] : "";
+        if (p) exhaustedProviders.add(p);
+      }
+    }
+    log.warn("COMBO", `Race ${raceModels[0]} vs ${raceModels[1]} both failed (${lastError}) — falling back`);
+    raceIndex = 2; // skip the raced models; continue with the rest
+  }
+
+  for (let i = raceIndex; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
 
     // Honor external abort before trying the next target.
@@ -388,9 +518,13 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         }
       }
 
-      // Success (2xx) - return response
+      // Success (2xx) - return response. For streaming the combo sees the
+      // response the moment upstream headers + first chunk arrive, so
+      // elapsed time is a close proxy for TTFT — pass it through so smart
+      // routing prefers fast-prefill models.
       if (result.ok) {
-        recordSuccess(modelStr, Date.now() - attemptStart);
+        const elapsedMs = Date.now() - attemptStart;
+        recordSuccess(modelStr, elapsedMs, elapsedMs);
         log.info("COMBO", `Model ${modelStr} succeeded`);
         return result;
       }

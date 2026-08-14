@@ -8,6 +8,7 @@ import { STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
+import { recordTtft } from "../../services/healthTracker.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 
 const STREAM_EARLY_EOF_STATUS = 502;
@@ -147,6 +148,17 @@ export async function handleStreamingResponse({
       errorCode: "STREAM_EARLY_EOF",
       error: "Upstream closed stream before any useful content"
     };
+  }
+
+  // Time-to-first-token: the peek above consumed the first upstream chunk, so
+  // now is the moment the first token actually arrived. Feed it to the health
+  // tracker so smart routing prefers fast-prefill accounts. Keyed by the same
+  // model string the combo router uses (provider/model).
+  const ttftMs = Date.now() - requestStartTime;
+  try {
+    recordTtft(`${provider}/${model}`, ttftMs);
+  } catch {
+    // Health tracking must never break the request path.
   }
 
   const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, responseModel: clientModelId });
